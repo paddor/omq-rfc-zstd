@@ -199,9 +199,15 @@ module OMQ
           return if @training_done
           return if plaintext.bytesize >= AUTO_DICT_MAX_SAMPLE_LEN
 
+          # OMQ's Writable mixin already hands us frozen binary Strings
+          # (frozen_binary + parts.freeze), so in the common case we
+          # can stash the caller's reference without a `.b` copy. Only
+          # coerce when the encoding/frozen invariants don't hold.
+          sample = plaintext.frozen? && plaintext.encoding == Encoding::BINARY ? plaintext : plaintext.b
+
           @training_mutex.synchronize do
             return if @training_done
-            @samples << plaintext.b
+            @samples << sample
             @samples_bytes += plaintext.bytesize
             @samples_count += 1
             maybe_train!

@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `Compression#add_sample` skips the `.b` dup when the incoming
+  plaintext is already a frozen binary String — OMQ's `Writable`
+  mixin already hands us frozen-binary parts, so in the common
+  case we stash the caller's reference instead of allocating a
+  fresh copy during auto-dict training.
 - `CompressionConnection#encode_parts` no longer does per-message
   `respond_to?(:auto?)` + `auto?` + `trained?` polymorphic dispatch
   on the send hot path. The "is this an auto-training compression
