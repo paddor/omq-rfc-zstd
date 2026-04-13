@@ -59,6 +59,10 @@ without changes to the payload.
 - Algorithm-agnostic negotiation surface: future RFCs can add `lz4:`,
   `brotli:`, ... profiles to the same READY property without obsoleting this
   one.
+- Decompress-only mode: an implementation MAY advertise compression
+  support solely to accept compressed frames from its peer, without
+  compressing any of its own outgoing frames. See Sec. 6.4 "Passive
+  senders".
 
 ### 3.2 Non-goals
 
@@ -193,6 +197,16 @@ If only one peer advertises `X-Compression`, the connection falls back to
 plaintext (no peer can decode something the other side does not
 understand).
 
+A peer MAY operate as a **passive sender** on the negotiated profile
+(Sec. 6.4): it advertises its profile list and participates in matching
+normally, but on its own direction it emits every message frame with
+the uncompressed sentinel without invoking the encoder. Passive
+operation is a unilateral sender choice and is orthogonal to
+negotiation -- the peer on the other side observes a compliant stream
+of uncompressed-sentinel frames (Sec. 6.3) and is unaware of the
+distinction. The selected profile still applies to the other direction
+of the same connection.
+
 ### 5.3 Dictionary identity
 
 The `zstd:dict:sha1:<hex>` profile carries the SHA-1 hex digest of the
@@ -280,6 +294,27 @@ The threshold split (64 with dict, 512 without) reflects empirical
 measurement: without a dictionary, Zstandard cannot compress
 lorem-ipsum-shaped text below ~512 B; with a dictionary, even 64 B
 payloads compress to ~20 B.
+
+**Passive senders.** An implementation MAY skip steps 2-4 entirely and
+emit every outgoing frame with the uncompressed sentinel `00 00 00 00`,
+regardless of `plaintext_bytesize`, without invoking the encoder. A
+passive sender still negotiates the profile normally so that it can
+decode compressed frames from its peer, but never produces a compressed
+frame on the wire in its own direction. Every frame it emits is a valid
+uncompressed-sentinel frame per Sec. 6.3, so the peer's receiver rules
+(Sec. 6.5) accept them without modification and need not be aware that
+the remote sender is passive. A passive sender that negotiated
+`zstd:dict:inline` or `zstd:dict:auto` MUST NOT emit a `ZDICT` command
+frame in its own direction (it has no dictionary to ship, since it
+never trains and was never configured with one). A passive sender MAY
+still receive and apply a `ZDICT` command frame from its peer on the
+other direction of the same connection.
+
+Passive operation exists for peers that want opportunistic
+decompression without forcing compression on their own traffic --
+typically diagnostic tools, gateways, and utility programs that act as
+receivers most of the time but that need to advertise a profile for
+matching to occur at all.
 
 ### 6.5 Receiver Rules
 

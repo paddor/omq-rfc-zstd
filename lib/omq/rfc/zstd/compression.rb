@@ -41,24 +41,32 @@ module OMQ
       class Compression
         attr_reader :sentinel, :profile, :level, :mode, :send_dict_bytes
 
-        def self.none(level: DEFAULT_LEVEL)
-          new(mode: :none, dictionary: nil, level: level)
+        def self.none(level: DEFAULT_LEVEL, passive: false)
+          new(mode: :none, dictionary: nil, level: level, passive: passive)
         end
 
-        def self.with_dictionary(bytes, inline: false, level: DEFAULT_LEVEL)
+        def self.with_dictionary(bytes, inline: false, level: DEFAULT_LEVEL, passive: false)
           new(
             mode: inline ? :dict_inline : :dict_static,
             dictionary: bytes,
             level: level,
+            passive: passive,
           )
         end
 
-        def self.auto(level: DEFAULT_LEVEL)
-          new(mode: :dict_auto, dictionary: nil, level: level)
+        def self.auto(level: DEFAULT_LEVEL, passive: false)
+          new(mode: :dict_auto, dictionary: nil, level: level, passive: passive)
         end
 
-        def initialize(mode:, dictionary:, level: DEFAULT_LEVEL)
+        # When +passive: true+, the socket advertises the profile and
+        # decodes incoming compressed frames, but never compresses
+        # outgoing messages -- #min_compress_bytes reports infinity, so
+        # every outgoing part falls through to the SENTINEL_UNCOMPRESSED
+        # path. Used by omq-cli to decompress-by-default without
+        # forcing compression on senders that didn't opt in.
+        def initialize(mode:, dictionary:, level: DEFAULT_LEVEL, passive: false)
           @mode             = mode
+          @passive          = passive
           @level            = Integer(level)
           @sentinel         = SENTINEL_ZSTD_FRAME
           @send_dictionary  = nil
@@ -99,7 +107,18 @@ module OMQ
           !@recv_dictionary.nil?
         end
 
+        # True if this side was configured as a passive sender
+        # (RFC Sec. 6.4 "Passive senders"): advertise the profile and
+        # decompress incoming frames, but never compress outgoing
+        # frames. Implemented by making #min_compress_bytes return
+        # infinity so every outgoing part falls through to the
+        # SENTINEL_UNCOMPRESSED path in Codec.encode_part.
+        def passive?
+          @passive == true
+        end
+
         def min_compress_bytes
+          return Float::INFINITY if passive?
           has_send_dictionary? ? MIN_COMPRESS_BYTES_DICT : MIN_COMPRESS_BYTES_NO_DICT
         end
 
@@ -176,6 +195,7 @@ module OMQ
         # @return [void]
         def add_sample(plaintext)
           return unless @mode == :dict_auto
+          return if @passive
           return if @training_done
           return if plaintext.bytesize >= AUTO_DICT_MAX_SAMPLE_LEN
 

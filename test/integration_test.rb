@@ -140,6 +140,32 @@ class IntegrationTest < Minitest::Test
   end
 
 
+  # RFC Sec. 6.4 "Passive senders": the pull side advertises the profile
+  # (so negotiation matches) but never compresses its own outgoing. The
+  # push side encodes normally; pull decodes and passes through.
+  def test_passive_receiver_decodes_active_senders_compressed_frames
+    Sync do
+      push = OMQ::PUSH.new
+      pull = OMQ::PULL.new
+      push.compression = OMQ::RFC::Zstd::Compression.auto
+      pull.compression = OMQ::RFC::Zstd::Compression.auto(passive: true)
+
+      pull.bind("tcp://127.0.0.1:0")
+      push.connect(pull.last_endpoint)
+
+      payload = ("the quick brown fox " * 50).b
+      push << [payload]
+      assert_equal [payload], pull.receive
+
+      assert pull.compression.passive?, "pull should report passive"
+      assert_equal Float::INFINITY, pull.compression.min_compress_bytes
+    ensure
+      push&.close
+      pull&.close
+    end
+  end
+
+
   def test_round_trip_with_static_dictionary
     dict = ("lorem ipsum dolor sit amet " * 20).b
     Sync do

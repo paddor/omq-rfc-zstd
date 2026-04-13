@@ -107,6 +107,8 @@ module OMQ
         def send_initial_dict!
           return if @dict_sent
           return unless @send_compression
+          # RFC Sec. 6.4: a passive sender MUST NOT emit a ZDICT frame.
+          return if @send_compression.respond_to?(:passive?) && @send_compression.passive?
           bytes = @send_compression.send_dict_bytes
           return unless bytes
           if bytes.bytesize > DICT_FRAME_MAX_SIZE

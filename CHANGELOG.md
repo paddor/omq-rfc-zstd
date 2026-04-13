@@ -23,3 +23,15 @@ Initial release.
 - `:dict_auto` mode caps training samples at 1 KiB each
   (`AUTO_DICT_MAX_SAMPLE_LEN`): large frames dilute the trained
   dictionary and blow the sample budget on a handful of messages.
+- **Passive sender mode (RFC Sec. 6.4).** All Compression factory
+  methods (`.none`, `.with_dictionary`, `.auto`) now take a
+  `passive:` keyword. A passive sender advertises its profile and
+  decompresses incoming frames normally, but emits every outgoing
+  frame with the uncompressed sentinel and never invokes the
+  encoder. `#min_compress_bytes` returns `Float::INFINITY` in this
+  mode, so `Codec.encode_part` falls through to the
+  SENTINEL_UNCOMPRESSED path for every outgoing part. Passive
+  senders also suppress auto-dict sample collection and ZDICT
+  emission. Used by omq-cli to decompress-by-default on
+  receive-capable sockets without forcing compression on peers that
+  didn't opt in.
