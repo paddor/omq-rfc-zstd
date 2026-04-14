@@ -6,7 +6,7 @@ require_relative "codec"
 require_relative "constants"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
 
       # Wraps a Protocol::ZMTP::Connection to transparently apply the
@@ -27,7 +27,7 @@ module OMQ
       # in +OMQ::Routing::FanOut+ falls back to per-connection
       # +write_message+.
       #
-      class CompressionConnection < SimpleDelegator
+      class Connection < SimpleDelegator
 
         # Mixed-in so +is_a?+ against Protocol::ZMTP::Connection still
         # matches the wrapped instance.
@@ -43,9 +43,9 @@ module OMQ
 
 
         # @param conn [Protocol::ZMTP::Connection] underlying connection
-        # @param send_compression [OMQ::RFC::Zstd::Compression, nil]
+        # @param send_compression [OMQ::Compression::Zstd::Compressor, nil]
         #   compression object used on outgoing parts; nil = no-op
-        # @param recv_compression [OMQ::RFC::Zstd::Compression, nil]
+        # @param recv_compression [OMQ::Compression::Zstd::Compressor, nil]
         #   compression object used on incoming parts; nil = no-op
         # @param max_message_size [Integer, nil]
         def initialize(conn, send_compression:, recv_compression:, max_message_size: nil, engine: nil)
@@ -61,7 +61,7 @@ module OMQ
           # Cached once: is the send side an auto-training compression
           # that still needs samples? Flipped false the moment training
           # completes, so #encode_parts drops the per-message branch.
-          @auto_sampling = send_compression.is_a?(Compression) && send_compression.auto?
+          @auto_sampling = send_compression.is_a?(Compressor) && send_compression.auto?
         end
 
 

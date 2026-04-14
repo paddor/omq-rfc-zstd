@@ -26,7 +26,7 @@
 
 require "benchmark"
 require "rzstd"
-require_relative "../lib/omq/rfc/zstd/constants"
+require_relative "../lib/omq/compression/zstd/constants"
 
 # Representative training corpus: the kind of chatty structured text
 # you'd see on an omq control channel or log stream. Mix of JSON-ish,
@@ -50,11 +50,11 @@ CORPUS = [
 # samples that rzstd's trainer has something to work with.
 SAMPLES = (CORPUS * 200).map(&:b)
 DICT_BYTES = RZstd::Dictionary.train(SAMPLES, capacity: 4096)
-DICT = RZstd::Dictionary.new(DICT_BYTES, level: OMQ::RFC::Zstd::DEFAULT_LEVEL)
+DICT = RZstd::Dictionary.new(DICT_BYTES, level: OMQ::Compression::Zstd::DEFAULT_LEVEL)
 DICT_BYTES_SIZE = DICT_BYTES.bytesize
 
-SENTINEL = OMQ::RFC::Zstd::SENTINEL_UNCOMPRESSED
-OVERHEAD = OMQ::RFC::Zstd::SENTINEL_SIZE
+SENTINEL = OMQ::Compression::Zstd::SENTINEL_UNCOMPRESSED
+OVERHEAD = OMQ::Compression::Zstd::SENTINEL_SIZE
 
 # Workload generators. All return N distinct binary payloads of exactly
 # `size` bytes.
@@ -111,9 +111,9 @@ def bench_skip(payloads)
   dt / (ITERS * payloads.size) * 1e9
 end
 
-puts "rzstd v#{RZstd::VERSION rescue "?"}  dict=#{DICT_BYTES_SIZE}B level=#{OMQ::RFC::Zstd::DEFAULT_LEVEL}"
+puts "rzstd v#{RZstd::VERSION rescue "?"}  dict=#{DICT_BYTES_SIZE}B level=#{OMQ::Compression::Zstd::DEFAULT_LEVEL}"
 puts "#{N_PAYLOADS} distinct payloads/size, #{ITERS} iterations per cell"
-puts "current MIN_COMPRESS_BYTES_DICT = #{OMQ::RFC::Zstd::MIN_COMPRESS_BYTES_DICT}"
+puts "current MIN_COMPRESS_BYTES_DICT = #{OMQ::Compression::Zstd::MIN_COMPRESS_BYTES_DICT}"
 
 WORKLOADS.each do |name, gen|
   puts

@@ -1,20 +1,19 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "omq/rfc/zstd/codec"
-require "omq/rfc/zstd/compression"
+require "omq/compression/zstd/codec"
+require "omq/compression/zstd/compressor"
 require "rzstd"
 
 # RFC Sec. 6.5 security rules: byte-bomb prevention, mandatory
 # Frame_Content_Size, multipart running-total enforcement.
 #
 class CodecSecurityTest < Minitest::Test
-  Codec       = OMQ::RFC::Zstd::Codec
-  Compression = OMQ::RFC::Zstd::Compression
+  Codec = OMQ::Compression::Zstd::Codec
 
 
   def setup
-    @compression = Compression.none # no-dict, zstd-active profile
+    @compression = OMQ::Compression::Zstd.none # no-dict, zstd-active profile
   end
 
 
@@ -24,7 +23,7 @@ class CodecSecurityTest < Minitest::Test
     payload = "A" * 100_000
     frame   = build_zstd_part(payload)
     # Budget smaller than declared size.
-    assert_raises(OMQ::RFC::Zstd::DecompressedSizeExceedsMaxError) do
+    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
       Codec.decode_part(frame, @compression, budget_remaining: 1_000)
     end
   end
@@ -37,7 +36,7 @@ class CodecSecurityTest < Minitest::Test
     payload = "A" * 10_000_000
     frame   = build_zstd_part(payload)
     before  = memory_footprint
-    assert_raises(OMQ::RFC::Zstd::DecompressedSizeExceedsMaxError) do
+    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
       Codec.decode_part(frame, @compression, budget_remaining: 1_000_000)
     end
     after = memory_footprint
@@ -72,7 +71,7 @@ class CodecSecurityTest < Minitest::Test
     raw_frame = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x01, 0x00, 0x00].pack("C*")
     # Wire frame body starts with the zstd magic sentinel; no extra
     # wrapper bytes, since zstd magic IS the sentinel (RFC Sec. 6.4).
-    assert_raises(OMQ::RFC::Zstd::MissingContentSizeError) do
+    assert_raises(OMQ::Compression::Zstd::MissingContentSizeError) do
       Codec.decode_part(raw_frame, @compression, budget_remaining: 10_000)
     end
   end
@@ -80,9 +79,9 @@ class CodecSecurityTest < Minitest::Test
 
   def test_missing_content_size_error_inherits_protocol_zmtp_error
     # So omq's recv pump treats it as expected disconnect.
-    assert_operator OMQ::RFC::Zstd::MissingContentSizeError,
+    assert_operator OMQ::Compression::Zstd::MissingContentSizeError,
                     :<, Protocol::ZMTP::Error
-    assert_operator OMQ::RFC::Zstd::DecompressedSizeExceedsMaxError,
+    assert_operator OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError,
                     :<, Protocol::ZMTP::Error
   end
 
@@ -96,7 +95,7 @@ class CodecSecurityTest < Minitest::Test
 
     plaintext_a = Codec.decode_part(part_a, @compression, budget_remaining: budget)
     remaining = budget - plaintext_a.bytesize
-    assert_raises(OMQ::RFC::Zstd::DecompressedSizeExceedsMaxError) do
+    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
       Codec.decode_part(part_b, @compression, budget_remaining: remaining)
     end
   end
@@ -105,8 +104,8 @@ class CodecSecurityTest < Minitest::Test
   # -- Uncompressed sentinel also respects the budget ----------------------
 
   def test_uncompressed_sentinel_is_charged_against_budget
-    body = OMQ::RFC::Zstd::SENTINEL_UNCOMPRESSED + ("x" * 20_000)
-    assert_raises(OMQ::RFC::Zstd::DecompressedSizeExceedsMaxError) do
+    body = OMQ::Compression::Zstd::SENTINEL_UNCOMPRESSED + ("x" * 20_000)
+    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
       Codec.decode_part(body, @compression, budget_remaining: 1_000)
     end
   end

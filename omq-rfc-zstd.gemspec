@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
-require_relative "lib/omq/rfc/zstd/version"
+require_relative "lib/omq/compression/zstd/version"
 
 Gem::Specification.new do |s|
   s.name        = "omq-rfc-zstd"
-  s.version     = OMQ::RFC::Zstd::VERSION
+  s.version     = OMQ::Compression::Zstd::VERSION
   s.authors     = ["Patrik Wenger"]
   s.email       = ["paddor@gmail.com"]
   s.summary     = "Transparent Zstandard compression for OMQ (ZMTP extension)"

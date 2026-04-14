@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.2.0
+
+### Changed
+
+- Module namespace moved from `OMQ::RFC::Zstd` to `OMQ::Compression::Zstd`.
+  The `require "omq/rfc/zstd"` entry point is preserved.
+- Factory methods `.none`, `.with_dictionary`, `.auto` moved from the
+  `Compressor` class to the `OMQ::Compression::Zstd` module itself:
+  `OMQ::Compression::Zstd.none`, `.with_dictionary(dict)`, `.auto`.
+- Renamed `Zstd::Compression` (class) to `Zstd::Compressor`.
+- Renamed `Zstd::CompressionConnection` (wrapper) to `Zstd::Connection`.
+
 ## v0.1.2
 
 ### Changed
@@ -9,7 +21,7 @@
   mixin already hands us frozen-binary parts, so in the common
   case we stash the caller's reference instead of allocating a
   fresh copy during auto-dict training.
-- `CompressionConnection#encode_parts` no longer does per-message
+- `Connection#encode_parts` no longer does per-message
   `respond_to?(:auto?)` + `auto?` + `trained?` polymorphic dispatch
   on the send hot path. The "is this an auto-training compression
   that still needs samples?" check is cached at construction as
@@ -25,8 +37,8 @@
 Initial release.
 
 - RFC draft for `X-Compression` READY property and `ZDICT` command frame.
-- `OMQ::RFC::Zstd::Compression` with `.none`, `.with_dictionary`, `.auto`.
-- Transparent `CompressionConnection` wrapper installed after handshake.
+- `OMQ::Compression::Zstd::Compressor` with `.none`, `.with_dictionary`, `.auto`.
+- Transparent `Connection` wrapper installed after handshake.
 - Per-direction compression negotiation (RFC §7.3).
 - Auto-trained dictionaries shipped over a single `ZDICT` command frame.
 - Integration tests against a real OMQ socket pair.

@@ -7,8 +7,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.none
-      pull.compression = OMQ::RFC::Zstd::Compression.none
+      push.compression = OMQ::Compression::Zstd.none
+      pull.compression = OMQ::Compression::Zstd.none
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)
@@ -28,8 +28,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.none
-      pull.compression = OMQ::RFC::Zstd::Compression.none
+      push.compression = OMQ::Compression::Zstd.none
+      pull.compression = OMQ::Compression::Zstd.none
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)
@@ -47,7 +47,7 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.none
+      push.compression = OMQ::Compression::Zstd.none
       # pull has no compression -- peer will not advertise X-Compression
 
       pull.bind("tcp://127.0.0.1:0")
@@ -68,8 +68,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict, inline: true)
-      pull.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict, inline: true)
+      push.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
+      pull.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)
@@ -88,8 +88,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.auto
-      pull.compression = OMQ::RFC::Zstd::Compression.auto
+      push.compression = OMQ::Compression::Zstd.auto
+      pull.compression = OMQ::Compression::Zstd.auto
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)
@@ -120,8 +120,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression       = OMQ::RFC::Zstd::Compression.none
-      pull.compression       = OMQ::RFC::Zstd::Compression.none
+      push.compression       = OMQ::Compression::Zstd.none
+      pull.compression       = OMQ::Compression::Zstd.none
       pull.max_message_size  = 4096
       pull.read_timeout      = 0.5
 
@@ -147,8 +147,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.auto
-      pull.compression = OMQ::RFC::Zstd::Compression.auto(passive: true)
+      push.compression = OMQ::Compression::Zstd.auto
+      pull.compression = OMQ::Compression::Zstd.auto(passive: true)
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)
@@ -171,8 +171,8 @@ class IntegrationTest < Minitest::Test
     Sync do
       push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict)
-      pull.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict)
+      push.compression = OMQ::Compression::Zstd.with_dictionary(dict)
+      pull.compression = OMQ::Compression::Zstd.with_dictionary(dict)
 
       pull.bind("tcp://127.0.0.1:0")
       push.connect(pull.last_endpoint)

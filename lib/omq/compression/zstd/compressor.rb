@@ -7,10 +7,29 @@ require_relative "constants"
 require "thread"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
+
+      def self.none(level: DEFAULT_LEVEL, passive: false)
+        Compressor.new mode: :none, dictionary: nil, level: level, passive: passive
+      end
+
+
+      def self.with_dictionary(bytes, inline: false, level: DEFAULT_LEVEL, passive: false)
+        Compressor.new mode: inline ? :dict_inline : :dict_static,
+          dictionary: bytes,
+          level:      level,
+          passive:    passive
+      end
+
+
+      def self.auto(level: DEFAULT_LEVEL, passive: false)
+        Compressor.new mode: :dict_auto, dictionary: nil, level: level, passive: passive
+      end
+
+
       # User-facing configuration object. Assigned to an OMQ socket via
-      # `socket.compression = OMQ::RFC::Zstd::Compression.new(...)`.
+      # `socket.compression = OMQ::Compression::Zstd.none/auto/with_dictionary(...)`.
       # Encapsulates the negotiated profile, the dictionaries (per
       # direction), the compression level, and the cached SHA-1 hash
       # used in the READY property.
@@ -38,26 +57,8 @@ module OMQ
       #                 (whichever comes first), installs it into the send
       #                 slot, and ships it via ZDICT. The recv slot is
       #                 populated when the peer's ZDICT arrives.
-      class Compression
+      class Compressor
         attr_reader :sentinel, :profile, :level, :mode, :send_dict_bytes
-
-
-        def self.none(level: DEFAULT_LEVEL, passive: false)
-          new mode: :none, dictionary: nil, level: level, passive: passive
-        end
-
-
-        def self.with_dictionary(bytes, inline: false, level: DEFAULT_LEVEL, passive: false)
-          new mode: inline ? :dict_inline : :dict_static,
-            dictionary: bytes,
-            level:      level,
-            passive:    passive
-        end
-
-
-        def self.auto(level: DEFAULT_LEVEL, passive: false)
-          new mode: :dict_auto, dictionary: nil, level: level, passive: passive
-        end
 
 
         # When +passive: true+, the socket advertises the profile and
@@ -172,7 +173,7 @@ module OMQ
 
 
         # Install a dictionary into the recv slot. Called by the
-        # CompressionConnection wrapper when a ZDICT command frame
+        # Connection wrapper when a ZDICT command frame
         # arrives from the peer.
         def install_recv_dictionary(bytes)
           @recv_dictionary = RZstd::Dictionary.new(bytes.b, level: @level)

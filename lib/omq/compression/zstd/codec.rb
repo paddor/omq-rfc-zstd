@@ -4,7 +4,7 @@ require "rzstd"
 require_relative "constants"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
       # Pure-function frame-body codec. Implements the sender/receiver rules
       # from RFC sections 6.4 and 6.5. Stateless: all state (dictionary,
@@ -18,7 +18,7 @@ module OMQ
         # message-frame body.
         #
         # @param plaintext [String] frame payload as supplied by the user
-        # @param compression [OMQ::RFC::Zstd::Compression] the negotiated
+        # @param compression [OMQ::Compression::Zstd::Compression] the negotiated
         #   send-direction compression object, or nil if no profile is active
         # @return [String] frame body bytes (always binary)
         def encode_part(plaintext, compression)
@@ -51,7 +51,7 @@ module OMQ
         # or raises before any decoder allocation.
         #
         # @param body [String] wire frame body bytes
-        # @param compression [OMQ::RFC::Zstd::Compression] the negotiated
+        # @param compression [OMQ::Compression::Zstd::Compression] the negotiated
         #   recv-direction compression object, or nil if no profile is active
         # @param budget_remaining [Integer, nil] remaining decompressed-byte
         #   budget for this multipart message; nil disables the cap

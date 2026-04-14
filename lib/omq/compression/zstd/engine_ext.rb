@@ -5,7 +5,7 @@ require_relative "connection"
 require_relative "constants"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
 
       # Prepended onto OMQ::Engine to install a compression-aware
@@ -23,7 +23,7 @@ module OMQ
             next conn unless compression
             next conn unless matched_profile(conn, compression)
 
-            wrapper = CompressionConnection.new(
+            wrapper = Connection.new(
               conn,
               send_compression: compression,
               recv_compression: compression,
@@ -51,4 +51,4 @@ module OMQ
   end
 end
 
-OMQ::Engine.prepend(OMQ::RFC::Zstd::EngineExt)
+OMQ::Engine.prepend(OMQ::Compression::Zstd::EngineExt)

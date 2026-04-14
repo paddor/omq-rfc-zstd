@@ -4,7 +4,7 @@ require "omq"
 require_relative "constants"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
 
       # Prepended onto OMQ::Options to add a +compression+ attribute.
@@ -43,4 +43,4 @@ module OMQ
   end
 end
 
-OMQ::Options.prepend(OMQ::RFC::Zstd::OptionsExt)
+OMQ::Options.prepend(OMQ::Compression::Zstd::OptionsExt)

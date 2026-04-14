@@ -1,9 +1,9 @@
 # frozen_string_literal: true
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
-      VERSION = "0.1.2"
+      VERSION = "0.2.0"
     end
   end
 end

@@ -3,7 +3,7 @@
 require "protocol/zmtp"
 
 module OMQ
-  module RFC
+  module Compression
     module Zstd
       SENTINEL_UNCOMPRESSED = "\x00\x00\x00\x00".b.freeze
       SENTINEL_ZSTD_FRAME   = "\x28\xB5\x2F\xFD".b.freeze

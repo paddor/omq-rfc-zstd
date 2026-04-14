@@ -38,18 +38,18 @@ require "omq/rfc/zstd"
 
 # 1. No dictionary — opportunistic compression for frames ≥ 512 B
 push = OMQ::PUSH.new
-push.compression = OMQ::RFC::Zstd::Compression.none
+push.compression = OMQ::Compression::Zstd.none
 push.connect("tcp://127.0.0.1:5555")
 
 # 2. Caller-supplied dictionary, agreed out of band
 dict = File.binread("schema.dict")
-push.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict)
+push.compression = OMQ::Compression::Zstd.with_dictionary(dict)
 
 # 3. Caller-supplied dictionary, sent over the wire once via DICT command
-push.compression = OMQ::RFC::Zstd::Compression.with_dictionary(dict, inline: true)
+push.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
 
 # 4. Auto-trained dictionary — zero config
-push.compression = OMQ::RFC::Zstd::Compression.auto
+push.compression = OMQ::Compression::Zstd.auto
 ```
 
 The default level is **3**. Pass `level:` to override (negative levels enable
