@@ -45,7 +45,7 @@ push.connect("tcp://127.0.0.1:5555")
 dict = File.binread("schema.dict")
 push.compression = OMQ::Compression::Zstd.with_dictionary(dict)
 
-# 3. Caller-supplied dictionary, sent over the wire once via DICT command
+# 3. Caller-supplied dictionary, sent over the wire once via ZDICT command
 push.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
 
 # 4. Auto-trained dictionary — zero config
@@ -64,7 +64,7 @@ the fast strategy; see RFC §3.4).
 | `OMQ::Options` extension (`compression=`) | Implemented |
 | Handshake property injection | Implemented |
 | `Connection#receive_message` / send seam | Implemented |
-| `DICT` command frame (`dict:inline`, `dict:auto`) | Implemented |
+| `ZDICT` command frame (`dict:inline`, `dict:auto`) | Implemented |
 | Integration test (real OMQ socket pair) | Implemented |
 | omq-cli integration (`-z` / `-Z` / `--compress=LEVEL`) | Implemented |
 
