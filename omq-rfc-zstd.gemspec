@@ -17,7 +17,7 @@ Gem::Specification.new do |s|
 
   s.files = Dir["lib/**/*.rb", "README.md", "RFC.md", "LICENSE"]
 
-  s.add_dependency "omq",           ">= 0.19.3"
+  s.add_dependency "omq", "~> 0.21"
   s.add_dependency "protocol-zmtp", ">= 0.7"
   s.add_dependency "rzstd",         ">= 0.2"
 end

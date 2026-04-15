@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.0 — 2026-04-15
+
+### Changed
+
+- **Requires omq ~> 0.21.**
+
 ## v0.2.0
 
 ### Changed
