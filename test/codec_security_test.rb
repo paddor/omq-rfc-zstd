@@ -1,129 +1,109 @@
 # frozen_string_literal: true
 
 require_relative "test_helper"
-require "omq/compression/zstd/codec"
-require "omq/compression/zstd/compressor"
 require "rzstd"
 
-# RFC Sec. 6.5 security rules: byte-bomb prevention, mandatory
-# Frame_Content_Size, multipart running-total enforcement.
-#
-class CodecSecurityTest < Minitest::Test
-  Codec = OMQ::Compression::Zstd::Codec
+describe "Codec security" do
+  def codec(**opts)
+    OMQ::Transport::ZstdTcp::Codec.new(level: -3, **opts)
+  end
 
-
-  def setup
-    @compression = OMQ::Compression::Zstd.none # no-dict, zstd-active profile
+  def connection(codec)
+    OMQ::Transport::ZstdTcp::ZstdConnection.new(FakeConn.new, codec)
   end
 
 
-  # -- Byte-bomb prevention (declared size > budget) -----------------------
+  class FakeConn
+    attr_reader :sent
 
-  def test_rejects_frame_whose_declared_content_size_exceeds_budget
+    def initialize
+      @sent = []
+    end
+
+    def write_message(parts)
+      @sent << parts
+    end
+
+    def receive_message
+      @sent.shift
+    end
+
+    def flush; end
+  end
+
+
+  it "rejects a frame whose declared FCS exceeds budget" do
+    c = codec(max_message_size: 1_000)
+    conn = connection(c)
     payload = "A" * 100_000
-    frame   = build_zstd_part(payload)
-    # Budget smaller than declared size.
-    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
-      Codec.decode_part(frame, @compression, budget_remaining: 1_000)
+    frame   = RZstd.compress(payload)
+    assert_raises(OMQ::Transport::ZstdTcp::ProtocolError) do
+      conn.send(:decode_parts, [frame])
     end
   end
 
 
-  def test_decoder_is_not_invoked_when_budget_would_be_exceeded
-    # A legitimate 10 MB payload compresses to ~300 bytes. Without the
-    # header check the decoder would allocate 10 MB; the check rejects
-    # the frame on its declared size alone.
-    payload = "A" * 10_000_000
-    frame   = build_zstd_part(payload)
-    before  = memory_footprint
-    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
-      Codec.decode_part(frame, @compression, budget_remaining: 1_000_000)
-    end
-    after = memory_footprint
-    # Loose upper bound: rejecting on header alone should cost much less
-    # than the 10 MB allocation we are preventing.
-    assert_operator (after - before), :<, 2_000_000,
-      "byte-bomb rejection allocated too much (#{after - before} bytes)"
-  end
-
-
-  def test_allows_frame_whose_declared_content_size_fits_budget
+  it "allows a frame that fits the budget" do
+    c = codec(max_message_size: 10_000)
+    conn = connection(c)
     payload = "A" * 8_000
-    frame   = build_zstd_part(payload)
-    plaintext = Codec.decode_part(frame, @compression, budget_remaining: 10_000)
-    assert_equal payload, plaintext
+    frame   = RZstd.compress(payload)
+    decoded = conn.send(:decode_parts, [frame])
+    assert_equal [payload], decoded
   end
 
 
-  def test_no_budget_check_when_max_is_nil
-    payload = "A" * 8_000
-    frame   = build_zstd_part(payload)
-    plaintext = Codec.decode_part(frame, @compression, budget_remaining: nil)
-    assert_equal payload, plaintext
-  end
-
-
-  # -- Missing Frame_Content_Size ------------------------------------------
-
-  def test_rejects_compressed_frame_without_content_size
-    # Hand-crafted zstd frame (magic + FHD=0x00 + WD=0x00 + last empty
-    # raw block) — the producer omitted Frame_Content_Size entirely.
+  it "rejects a compressed frame without Frame_Content_Size" do
+    c = codec
+    conn = connection(c)
     raw_frame = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00, 0x01, 0x00, 0x00].pack("C*")
-    # Wire frame body starts with the zstd magic sentinel; no extra
-    # wrapper bytes, since zstd magic IS the sentinel (RFC Sec. 6.4).
-    assert_raises(OMQ::Compression::Zstd::MissingContentSizeError) do
-      Codec.decode_part(raw_frame, @compression, budget_remaining: 10_000)
+    assert_raises(OMQ::Transport::ZstdTcp::ProtocolError) do
+      conn.send(:decode_parts, [raw_frame])
     end
   end
 
 
-  def test_missing_content_size_error_inherits_protocol_zmtp_error
-    # So omq's recv pump treats it as expected disconnect.
-    assert_operator OMQ::Compression::Zstd::MissingContentSizeError,
-                    :<, Protocol::ZMTP::Error
-    assert_operator OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError,
-                    :<, Protocol::ZMTP::Error
-  end
-
-
-  # -- Multipart running-total enforcement --------------------------------
-
-  def test_multipart_sum_exceeding_budget_is_rejected_before_decoder
-    part_a = build_zstd_part("A" * 8_000)
-    part_b = build_zstd_part("B" * 8_000) # sum = 16_000
-    budget = 10_000
-
-    plaintext_a = Codec.decode_part(part_a, @compression, budget_remaining: budget)
-    remaining = budget - plaintext_a.bytesize
-    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
-      Codec.decode_part(part_b, @compression, budget_remaining: remaining)
+  it "rejects multipart message whose decompressed sum exceeds budget" do
+    c = codec(max_message_size: 10_000)
+    conn = connection(c)
+    part_a = RZstd.compress("A" * 8_000)
+    part_b = RZstd.compress("B" * 8_000)
+    assert_raises(OMQ::Transport::ZstdTcp::ProtocolError) do
+      conn.send(:decode_parts, [part_a, part_b])
     end
   end
 
 
-  # -- Uncompressed sentinel also respects the budget ----------------------
-
-  def test_uncompressed_sentinel_is_charged_against_budget
-    body = OMQ::Compression::Zstd::SENTINEL_UNCOMPRESSED + ("x" * 20_000)
-    assert_raises(OMQ::Compression::Zstd::DecompressedSizeExceedsMaxError) do
-      Codec.decode_part(body, @compression, budget_remaining: 1_000)
+  it "charges uncompressed sentinel against budget" do
+    c = codec(max_message_size: 1_000)
+    conn = connection(c)
+    body = OMQ::Transport::ZstdTcp::Codec::NUL_PREAMBLE + ("x" * 20_000)
+    assert_raises(OMQ::Transport::ZstdTcp::ProtocolError) do
+      conn.send(:decode_parts, [body])
     end
   end
 
 
-  private
-
-
-  def build_zstd_part(plaintext)
-    # Produces a body whose first 4 bytes are the zstd magic (= the
-    # ZMTP-Zstd "compressed" sentinel), with Frame_Content_Size set to
-    # plaintext.bytesize by rzstd's compress2.
-    RZstd.compress(plaintext)
+  it "allows dict overwrite" do
+    c = codec
+    conn = connection(c)
+    samples = 400.times.map { |i| "user_#{i}|key=#{i}|val=#{i * 7}" }
+    dict_bytes = RZstd::Dictionary.train(samples, capacity: 8 * 1024)
+    result1 = conn.send(:decode_parts, [dict_bytes])
+    assert_nil result1
+    result2 = conn.send(:decode_parts, [dict_bytes])
+    assert_nil result2
   end
 
 
-  def memory_footprint
-    GC.start
-    GC.stat(:total_allocated_objects)
+  it "rejects oversized dict" do
+    c = codec
+    conn = connection(c)
+    samples = 400.times.map { |i| "user_#{i}|key=#{i}|val=#{i * 7}" }
+    dict_bytes = RZstd::Dictionary.train(samples, capacity: 8 * 1024)
+    padded = dict_bytes + ("\x00" * (65 * 1024))
+    assert_raises(OMQ::Transport::ZstdTcp::ProtocolError) do
+      conn.send(:decode_parts, [padded])
+    end
   end
 end

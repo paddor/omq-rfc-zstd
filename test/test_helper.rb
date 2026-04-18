@@ -5,4 +5,4 @@ Warning[:experimental] = false
 require "minitest/autorun"
 require "async"
 require "omq"
-require "omq/rfc/zstd"
+require "omq/transport/zstd_tcp"

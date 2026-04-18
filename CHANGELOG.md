@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.4.0 — 2026-04-18
+
+### Changed
+
+- **Reshaped as a full transport.** Zstd compression is no longer a
+  connection wrapper negotiated via the `X-Compression` READY property —
+  it is now intrinsic to a new `zstd+tcp://` transport scheme. Pick the
+  scheme and every post-handshake message part is compressed; plain-TCP
+  peers interoperate only if they also speak `zstd+tcp://`. The ZMTP
+  handshake itself still runs in the clear (no plain/compressed
+  ambiguity on the wire).
+
+- **Namespace: `OMQ::Compression::Zstd` → `OMQ::Transport::ZstdTcp`.**
+  The old `OMQ::Compression::Zstd.none/.with_dictionary/.auto` factory
+  methods and the per-socket `#compression=` accessor are gone. Supply
+  `level:` and `dict:` as connect/bind kwargs (or on the endpoint URI)
+  instead.
+
+- **Gem renamed `omq-rfc-zstd` → `omq-zstd`.** The `-rfc-` infix was a
+  historical relic. Update your Gemfile to `gem "omq-zstd"` and your
+  require to `require "omq/zstd"`. The old `require "omq/rfc/zstd"`
+  entry point is removed.
+
+- **Requires omq ~> 0.23.**
+
+### Removed
+
+- `X-Compression` READY property and per-peer negotiation. The transport
+  scheme now carries the intent; there is nothing to advertise.
+- `OMQ::Compression::Zstd::Compressor` and `Connection` wrapper classes.
+- Per-socket `#compression` / `#compression=` accessors.
+
+
 ## v0.3.0 — 2026-04-15
 
 ### Changed

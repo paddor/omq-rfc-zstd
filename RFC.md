@@ -1,630 +1,453 @@
-# ZMTP-Zstd: Transparent Zstandard Compression for ZMTP
+# ZMTP over Zstd+TCP: Zstandard-Compressed TCP Transport for ZMTP
 
 | Field | Value |
 |----------|----------------------------------------------------|
 | Status | Draft |
 | Editor | Patrik Wenger |
 | Requires | [RFC 37/ZMTP 3.1](https://rfc.zeromq.org/spec/37/) |
-| Extends | ZMTP 3.1 message frames over `tcp://` |
 
 ## 1. Abstract
 
-ZMTP-Zstd is a negotiated, transparent, per-frame Zstandard compression
-extension for ZMTP 3.1 message frames. Peers advertise compression support
-via a READY property during the handshake. When both peers advertise a
-matching profile, message frame bodies are compressed individually on the
-wire, optionally using a shared dictionary. The dictionary may be supplied
-out of band, sent over the wire once via the `ZDICT` command frame, or
-trained automatically by the sender from the first 1000 messages (or 100
-KiB of plaintext) of the connection. Peers that do not advertise
-compression see a normal, uncompressed ZMTP 3.1 stream -- the extension is
-fully backwards compatible.
+This specification defines `zstd+tcp://`, a TCP transport for ZMTP 3.1
+that applies per-part Zstandard compression after the ZMTP handshake.
+Both peers use the `zstd+tcp://` scheme in their endpoint URIs. The ZMTP
+greeting and handshake proceed over raw TCP exactly as they would over
+`tcp://`. After the handshake completes, every message part on the wire
+is individually encoded with a 4-byte sentinel dispatch that
+distinguishes uncompressed plaintext, Zstandard-compressed frames, and
+dictionary shipments. No ZMTP properties, command frames, or
+negotiation are involved — compression is an intrinsic property of the
+transport, like encryption is an intrinsic property of TLS.
 
 ## 2. Motivation
 
-Modern general-purpose compressors -- Zstandard in particular -- have closed
-the gap between "fast enough to ignore" and "saves real bytes". At its
-fast-strategy (negative) levels Zstandard encodes in single-digit
-microseconds per kilobyte, decompresses faster still, and on
-dictionary-trained workloads compresses small frames to a fraction of
-their size. For most ZMTP deployments compression can now be treated as
-almost free CPU-wise, while still recovering large fractions of the wire
-budget.
+Zstandard at low compression levels encodes in single-digit microseconds
+per kilobyte, decompresses faster still, and on dictionary-trained
+workloads compresses small frames to a fraction of their size. For most
+ZMTP deployments compression can be treated as almost free CPU-wise,
+while recovering large fractions of the wire budget.
 
 Network-bound or bandwidth-constrained deployments (publish/subscribe
-fan-out, IoT, cross-region replication) can trade a small amount of CPU for
-a large amount of wire time. Zstandard at low levels is fast at the
-sender, very fast at the receiver, and its dictionary mode is a good fit
-for the small-message profile typical of ZMQ workloads.
+fan-out, cross-region replication, IoT telemetry) trade a small amount
+of CPU for a large reduction in wire time. Zstandard's dictionary mode
+is a good fit for the small-message profile typical of ZMQ workloads.
 
 ZMTP applications today either accept the wire cost or layer ad-hoc,
 per-payload compression into the application format. The latter requires
-the application to opt in on both sides and bakes the compression into the
-payload rather than the transport. ZMTP-Zstd replaces it with a
-transport-level negotiation that any ZMTP application benefits from
-without changes to the payload.
+both sides to opt in and bakes compression into the payload rather than
+the transport. `zstd+tcp://` replaces it with a transport-level
+mechanism that any ZMTP application benefits from without changes to the
+payload.
+
+### 2.1 Why a transport scheme
+
+Compression could live at three layers. Each has a fatal flaw except the
+transport layer.
+
+**Socket-level wrapper** (too high). A wrapper above routing knows
+nothing about transports. It compresses local connections (pure
+overhead) and cannot act on new connections naturally — dictionary
+shipping requires per-connection state, but a wrapper only sees messages
+after routing has dispatched them. Reconnect handling requires hooking
+into connection lifecycle events that are awkward from outside.
+
+**ZMTP connection layer** (too low). Embedding compression into each
+ZMTP connection means fan-out patterns compress the same message N times
+(once per subscriber connection). The connection layer has no
+socket-wide view, so there is no way to share compression work across
+connections.
+
+**Transport layer** (right). `zstd+tcp://` makes transport selection
+explicit in the endpoint URI. Only TCP connections get compressed. Local
+transports are unaffected even on the same socket. Dictionary lifetime
+matches connection lifetime naturally (new connection = new wrapper =
+re-ship dictionary). No negotiation is needed — both peers use
+`zstd+tcp://`. The codec is socket-wide (shared across connections), so
+fan-out patterns compress once and reuse the result.
+
+### 2.2 Why not negotiate
+
+ZMTP 3.1 already supports unknown READY properties — an unaware peer
+silently ignores them. A negotiation-based design could fall back to
+plaintext when the peer does not understand compression. But this
+introduces complexity (profile matching, asymmetric per-direction state,
+passive senders) for a marginal benefit: in practice, compression is a
+deployment decision, not a runtime discovery. Both peers are configured
+to use `zstd+tcp://` or they are not. The transport scheme approach
+eliminates the entire negotiation surface and its edge cases.
+
+### 2.3 Why Zstandard
+
+Zstandard at low levels matches LZ4 on encode latency, beats it on
+decompression speed and ratio at every realistic ZMQ payload size, and
+has a first-class dictionary story. The decompression advantage is
+particularly important for fan-out patterns (PUB/SUB, RADIO/DISH): the
+publisher pays one compress, every subscriber pays decompress, so
+per-subscriber CPU dominates the total budget.
 
 ## 3. Goals and Non-goals
 
 ### 3.1 Goals
 
-- Transparent to application code: send / receive operations see plaintext.
-- Per-frame sender decision: opt out for short or incompressible frames.
-- Backwards compatible with any ZMTP 3.1 peer that does not advertise
-  compression.
-- Works for legacy multi-frame socket types (PUSH/PULL, PUB/SUB, ...) and
+- Transparent to application code: send/receive operations see plaintext.
+- Per-part sender decision: opt out for short or incompressible parts.
+- Works for legacy multipart socket types (PUSH/PULL, PUB/SUB, ...) and
   draft single-frame types alike.
-- Small-message-friendly via an optional shared dictionary, either explicit
-  or automatically trained.
-- Algorithm-agnostic negotiation surface: future RFCs can add `lz4:`,
-  `brotli:`, ... profiles to the same READY property without obsoleting this
-  one.
-- Decompress-only mode: an implementation MAY advertise compression
-  support solely to accept compressed frames from its peer, without
-  compressing any of its own outgoing frames. See Sec. 6.4 "Passive
-  senders".
+- Small-message-friendly via an optional shared dictionary, either
+  supplied out of band or automatically trained from early traffic.
+- No ZMTP-level negotiation, no new READY properties, no new command
+  frames.
 
 ### 3.2 Non-goals
 
 - New ZMTP mechanism, new socket type, new greeting, new frame flag bit.
-- Compression of the ZMTP greeting or non-`ZDICT` command frames (READY,
-  SUBSCRIBE, PING, ...).
-- `inproc://` (zero-copy -- compression is pure overhead) or `ipc://`
-- Replacing or weakening CurveZMQ or any other security mechanism. See Sec. 9.
-- **Streaming / context-takeover compression**, in the style of
-  WebSocket `permessage-deflate`. Zstandard supports it via streaming
-  frames or raw-content prefix dictionaries, where each compressed
-  message inherits the LZ77 history of its predecessors. That mode is
-  more efficient on streams of similar messages than per-frame
-  dictionary compression, but trades away the per-frame independence
-  that this RFC relies on (any frame decodable in isolation,
-  drop-tolerant under HWM, no head-of-line dependency on a previous
-  frame). A future RFC could define a separate profile (e.g.
-  `zstd:stream`) for it; this RFC deliberately does not.
-
-### 3.3 Why Zstandard
-
-Zstandard at low levels matches LZ4 on encode latency, beats it
-substantially on decompression speed and on ratio at every realistic ZMQ
-payload size, and has a first-class dictionary story. The decompression
-advantage is particularly important for the fan-out patterns ZMQ is built
-around (PUB/SUB, RADIO/DISH): the publisher pays one compress, every
-subscriber pays decompress, so per-subscriber CPU dominates the total
-budget.
-
-### 3.4 Compression level
-
-The default level is **-3** (Zstandard fast strategy). At this level the
-encoder cost is in the low single-digit microseconds per kilobyte across
-all measured payload sizes, and the achieved ratio is within a few
-percent of level 3 once a dictionary is in play. The level is a sender
-choice and is not negotiated -- the receiver decodes any valid
-Zstandard frame regardless of the level used to encode it.
-Implementations MUST support negative levels (the "fast" strategy) and
-SHOULD expose the level as a per-socket configuration knob.
-
-Empirically, on lorem-ipsum payloads with a 512 B shared dictionary:
-
-| level | strategy | typical c+d (1 KB, dict) | typical ratio (1 KB, dict) |
-|-------|----------|--------------------------|----------------------------|
-| -3 | fast | 2.9 us | 0.165 |
-| -1 | fast | 3.8 us | 0.157 |
-| 1 | normal | 6.7 us | 0.121 |
-| 3 | normal | 2.9 us | 0.124 |
-| 9 | high | 11.2 us | 0.121 |
-
-Levels above 5 are not recommended for transparent per-frame compression:
-the encoder cost grows steeply with no meaningful ratio improvement on the
-small payloads typical of ZMQ workloads. Decompression speed is
-independent of the compression level used by the sender.
-
-### 3.5 Recommended profiles by messaging pattern
-
-This section is informative, not normative. All recommendations assume
-the default level of -3.
-
-| Pattern | Recommendation |
-|-----------------------------------------------|---------------------------------|
-| Fan-out (PUB/SUB, XPUB/XSUB, RADIO/DISH) | `zstd:dict:auto` |
-| Fan-in (many PUSH -> 1 PULL, DEALER -> ROUTER) | `zstd:dict:auto` |
-| Symmetric small/medium (PUSH/PULL, REQ/REP, PAIR, <=4 KB) | `zstd:dict:auto` |
-| Symmetric large (>=16 KB) | `zstd:none` |
-| One-shot tiny messages, no dictionary plausible | `zstd:none` |
-| Co-administered peers with a known schema | `zstd:dict:sha1:<hex>` |
-
-The fan-out recommendation is based on the per-subscriber decompress
-advantage compounding linearly with subscriber count. The large-message
-recommendation reflects that the dictionary advantage shrinks once the
-payload is much larger than the dictionary itself.
+- Compression of the ZMTP greeting or command frames (READY, SUBSCRIBE,
+  PING, PONG, ...).
+- Application to non-TCP transports (`inproc://` is zero-copy —
+  compression is pure overhead; `ipc://` rarely benefits).
+- Replacing or weakening CurveZMQ or any other security mechanism.
+  See Sec. 8.
+- Streaming / context-takeover compression. Each part is decodable in
+  isolation with no dependency on a previous part's LZ77 history.
 
 ## 4. Terminology
 
 | Term | Meaning |
-|-------------|----------------------------------------------------------------------------|
-| Profile | A string naming a compression scheme, e.g. `zstd:none` or `zstd:dict:sha1:<hex>` |
-| Dictionary | A shared byte string used as a preamble to the Zstandard compressor |
-| Sentinel | The 4-byte prefix on every post-negotiation message frame body (Sec. 6) |
-| Uncompressed frame | A post-negotiation message frame whose sentinel is `00 00 00 00` |
-| Compressed frame | A post-negotiation message frame whose first 4 bytes are the Zstandard magic `28 B5 2F FD` |
-| Aware peer | A peer that advertises an `X-Compression` READY property |
-| Unaware peer| A peer that does not advertise an `X-Compression` READY property |
-| `ZDICT` frame | A ZMTP command frame, command name `ZDICT`, body = raw dictionary bytes |
+|---------------------|---------------------------------------------------------------------------|
+| Part | One ZMTP message frame body. A multipart message has multiple parts.      |
+| Sentinel            | The first 4 bytes of a post-handshake part on the wire (Sec. 5.1).       |
+| Uncompressed part   | A wire part whose sentinel is `00 00 00 00`.                              |
+| Compressed part     | A wire part whose first 4 bytes are the Zstandard magic `28 B5 2F FD`.   |
+| Dictionary part     | A wire part whose first 4 bytes are `37 A4 30 EC` (Sec. 6).              |
+| Dictionary message  | A single-part ZMTP message consisting of exactly one dictionary part.     |
 
-## 5. Handshake Negotiation
+## 5. Part Encoding
 
-### 5.1 The `X-Compression` READY property
+After the ZMTP handshake completes, every message part on the wire is
+individually encoded. The ZMTP MORE flag is carried on the wire frame
+header as normal. Multipart messages are encoded part by part — each
+part is independent.
 
-An aware peer MUST include an `X-Compression` property in its READY
-command. The property value is a comma-separated list of profile strings,
-in preference order (most preferred first):
+### 5.1 Sentinel dispatch
 
-```
-X-Compression: zstd:dict:auto, zstd:dict:sha1:7f3a..., zstd:none
-```
+The first 4 bytes of each wire part determine how it is decoded.
 
-Profile strings are ASCII, case-sensitive, with no embedded whitespace.
-Implementations MUST tolerate (and ignore) profile names they do not
-understand -- this is the forward-compatibility hook for future algorithms
-(`lz4:dict:auto`, `brotli:none`, ...).
+| Sentinel (hex)   | Meaning                                                         |
+|------------------|-----------------------------------------------------------------|
+| `00 00 00 00`    | Uncompressed plaintext (Sec. 5.3)                               |
+| `28 B5 2F FD`    | Zstandard compressed frame (Sec. 5.4)                           |
+| `37 A4 30 EC`    | Dictionary shipment (Sec. 6)                                    |
 
-The property name `X-Compression` is deliberately algorithm-neutral. Every
-profile carries its algorithm in its prefix, and the on-wire sentinel
-disambiguates encoded frames at the byte level (Sec. 6.1). New compression
-algorithms can be added by separate RFCs that define new profile strings
-under the same property name.
+All other 4-byte values are reserved. A receiver that encounters an
+unknown sentinel MUST drop the connection with an error.
 
-### 5.2 Matching
+### 5.2 Compression level
 
-Each peer intersects its own advertised list with the peer's, in its own
-preference order, and selects the first matching profile. The selected
-profile applies to **both directions** of the connection. This RFC does
-not define asymmetric pairings (different algorithms or different
-profiles per direction); a future RFC could lift that restriction.
+The default compression level is **-3** (Zstandard fast strategy). At
+this level the encoder cost is in the low single-digit microseconds per
+kilobyte, and the achieved ratio is within a few percent of level 3 once
+a dictionary is in play.
 
-Implementations SHOULD order their advertised list so that concrete
-dictionaries win over auto-trained ones: `zstd:dict:sha1:<hex>` first,
-then `zstd:dict:inline`, then `zstd:dict:auto`, then `zstd:none`. A peer
-that has a configured dictionary but also supports `zstd:dict:auto` will
-then converge on its existing dictionary instead of waiting for an
-auto-training cycle.
+The compression level is a sender choice and is not communicated on the
+wire — the receiver decodes any valid Zstandard frame regardless of the
+level used to encode it. Implementations SHOULD expose the level as a
+configurable parameter.
 
-If the intersection is empty, the connection falls back to plaintext ZMTP
-3.1 -- the connection still succeeds, no compression is applied.
-Implementations that expose a connection-monitoring facility MAY surface
-this outcome through it.
-
-If only one peer advertises `X-Compression`, the connection falls back to
-plaintext (no peer can decode something the other side does not
-understand).
-
-A peer MAY operate as a **passive sender** on the negotiated profile
-(Sec. 6.4): it advertises its profile list and participates in matching
-normally, but on its own direction it emits every message frame with
-the uncompressed sentinel without invoking the encoder. Passive
-operation is a unilateral sender choice and is orthogonal to
-negotiation -- the peer on the other side observes a compliant stream
-of uncompressed-sentinel frames (Sec. 6.3) and is unaware of the
-distinction. The selected profile still applies to the other direction
-of the same connection.
-
-### 5.3 Dictionary identity
-
-The `zstd:dict:sha1:<hex>` profile carries the SHA-1 hex digest of the
-dictionary bytes. Two peers select this profile only if they advertise the
-same digest, which means the dictionary each side loaded has the same
-content. Mismatched dictionaries -> no match -> fallback.
-
-SHA-1 is used because the digest is purely for fingerprinting, not
-security: collision resistance is not a property the dictionary identity
-needs, and SHA-1 is universally available. Future RFCs that prefer a
-different hash MUST register a new profile string with a different
-prefix (e.g. `zstd:dict:xxh64:<hex>`); this RFC's `zstd:dict:sha1:`
-profile is fixed to SHA-1 so that two peers advertising the same digest
-can be sure they computed it the same way.
-
-## 6. Frame Format
-
-### 6.1 Sentinel values
-
-A sentinel is the first 4 bytes of a post-negotiation message frame body.
-
-| Sentinel (hex) | Meaning | Source of the bytes |
-|------------------|--------------|---------------------|
-| `00 00 00 00` | Uncompressed | Invented by this RFC. Four zero bytes are not a valid Zstandard frame magic, so they cannot collide with a real compressed frame. |
-| `28 B5 2F FD` | Zstandard frame | The [official Zstandard frame magic](https://datatracker.ietf.org/doc/html/rfc8478#section-3.1.1). Not prepended by this RFC -- it is the first 4 bytes of the Zstandard frame the encoder already emitted. The receiver passes the **entire** frame body (including the magic) to the decoder. |
-
-All other 4-byte values MUST cause the receiver to drop the connection
-with an error of the form `ZMTP-Zstd: unknown sentinel`. This is the
-extension slot for future compression RFCs: an LZ4 follow-up could reserve
-`04 22 4D 18`, a Brotli follow-up could pick something distinguishable,
-etc., and reuse the negotiation and framing rules from this RFC unchanged.
-
-### 6.2 Why the Zstandard magic works as a sentinel
-
-The Zstandard frame magic `28 B5 2F FD` is fixed at the start of any valid
-Zstandard frame. A receiver that sees those bytes at offset 0 of a frame
-body knows the sender intended a compressed frame. A real uncompressed
-payload whose first 4 bytes happen to be `28 B5 2F FD` is handled by Sec. 6.4
-step 2: the sender prepends `00 00 00 00` and emits 4 + N bytes. The
-receiver decodes the `00 00 00 00` sentinel, skips it, and hands the
-remaining N bytes (starting with `28 B5 2F FD`) to the application as
-plaintext. No ambiguity.
-
-### 6.3 Uncompressed sentinel `00 00 00 00`
+### 5.3 Uncompressed sentinel `00 00 00 00`
 
 ```
-+-------------+------------------+
-| 00 00 00 00 | plaintext payload|
-| (4 B) | (N bytes) |
-+-------------+------------------+
++------------------+-------------------+
+| 00 00 00 00      | plaintext payload |
+| (4 bytes)        | (N bytes)         |
++------------------+-------------------+
 ```
 
-The sender uses this sentinel when it decides, per Sec. 6.4, not to compress
-the frame. The 4-byte overhead is the price of per-frame selective
-compression without an extra flag bit in the ZMTP frame header.
+The sender uses this sentinel when it decides not to compress the part.
+The 4-byte overhead is the price of per-part selective compression
+without an extra flag bit in the ZMTP frame header.
 
-### 6.4 Sender Rules
+Four zero bytes cannot collide with a valid Zstandard frame magic or the
+dictionary sentinel, so no ambiguity arises.
 
-For each outgoing message frame, the sender proceeds as follows:
+### 5.4 Compressed Zstandard frame
 
-1. If no profile was negotiated for this direction, emit the frame
-   plaintext with no sentinel (standard ZMTP 3.1).
-2. Compute `min`:
-   - if a dictionary is currently installed: `min = 64`
-   - otherwise (`zstd:none`, or `zstd:dict:auto` before training):
-     `min = 512`
+```
++------------------+
+| Zstandard frame  |
+| (M bytes)        |
++------------------+
+```
 
-   These are conservative starting points based on lorem-ipsum
-   measurements. Implementations MAY tune them downward (potentially to
-   `0` in the dictionary case) if their workload measurements justify it.
-3. If `plaintext_bytesize < min`, prepend `00 00 00 00` and emit. Short
-   frames are not worth the sentinel + compressor overhead.
-4. Otherwise, run the Zstandard encoder. The encoder MUST be configured
-   to write the `Frame_Content_Size` field in the Zstandard frame header
-   (RFC 8878 Sec. 3.1.1.1.2). If the compressed output's bytesize is greater
-   than or equal to `plaintext_bytesize - 4` (net saving <= 0 after
-   accounting for the 4-byte sentinel of the uncompressed alternative),
-   prepend `00 00 00 00` and emit the plaintext. Otherwise emit the
-   Zstandard frame as-is -- its first 4 bytes ARE the sentinel.
-5. Multi-part messages: each frame in the message is compressed
-   independently. The ZMTP MORE flag is carried on the wire frame header
-   as normal.
+The wire part IS the Zstandard frame — its first 4 bytes are the
+standard Zstandard frame magic `28 B5 2F FD`. No additional framing is
+added.
 
-The threshold split (64 with dict, 512 without) reflects empirical
-measurement: without a dictionary, Zstandard cannot compress
-lorem-ipsum-shaped text below ~512 B; with a dictionary, even 64 B
-payloads compress to ~20 B.
+The sender MUST configure the encoder to write the `Frame_Content_Size`
+field in the Zstandard frame header (RFC 8878 §3.1.1.1.2). This field
+is required for the receiver's budget enforcement (Sec. 5.6).
 
-**Passive senders.** An implementation MAY skip steps 2-4 entirely and
-emit every outgoing frame with the uncompressed sentinel `00 00 00 00`,
-regardless of `plaintext_bytesize`, without invoking the encoder. A
-passive sender still negotiates the profile normally so that it can
-decode compressed frames from its peer, but never produces a compressed
-frame on the wire in its own direction. Every frame it emits is a valid
-uncompressed-sentinel frame per Sec. 6.3, so the peer's receiver rules
-(Sec. 6.5) accept them without modification and need not be aware that
-the remote sender is passive. A passive sender that negotiated
-`zstd:dict:inline` or `zstd:dict:auto` MUST NOT emit a `ZDICT` command
-frame in its own direction (it has no dictionary to ship, since it
-never trains and was never configured with one). A passive sender MAY
-still receive and apply a `ZDICT` command frame from its peer on the
-other direction of the same connection.
+### 5.5 Sender rules
 
-Passive operation exists for peers that want opportunistic
-decompression without forcing compression on their own traffic --
-typically diagnostic tools, gateways, and utility programs that act as
-receivers most of the time but that need to advertise a profile for
-matching to occur at all.
+For each outgoing message part, the sender proceeds as follows:
 
-### 6.5 Receiver Rules
+1. Compute `min_size`:
+   - If a dictionary is currently installed: **64 bytes**.
+   - Otherwise: **512 bytes**.
 
-For each incoming message frame, the receiver proceeds as follows:
+   These thresholds reflect empirical measurement: without a dictionary,
+   Zstandard cannot usefully compress typical payloads below ~512 bytes;
+   with a dictionary, even 64-byte payloads compress to ~20 bytes.
+   Implementations MAY tune these thresholds.
 
-1. If no profile was negotiated for this direction, the body is plaintext
-   (standard ZMTP 3.1). Return as-is.
-2. Otherwise, read the first 4 bytes of the body as the sentinel. If the
-   body is shorter than 4 bytes, drop the connection with `ZMTP-Zstd:
-   short frame`.
-3. If the sentinel is `00 00 00 00`, the remaining `N - 4` bytes are
-   plaintext. Return them.
-4. If the sentinel is `28 B5 2F FD`, the body is a complete Zstandard
-   frame. The receiver MUST read the frame's `Frame_Content_Size` field
-   from the Zstandard header BEFORE calling the decoder. If the field is
-   absent, drop the connection with `ZMTP-Zstd: missing content size`.
-   If the connection enforces a maximum message size, the receiver MUST
-   add this frame's declared content size to the running decompressed
-   total for the current multipart message (frames chained by the ZMTP
-   MORE flag). If that running total would exceed the maximum, drop the
-   connection with `ZMTP-Zstd: decompressed message size exceeds maximum`
-   without invoking the decoder. The decoder MUST then be invoked in a
-   mode that aborts as soon as it would write more bytes than this
-   frame's declared `Frame_Content_Size`; on such an abort, drop the
-   connection with `ZMTP-Zstd: content size mismatch`.
-5. Any other sentinel value: drop the connection with `ZMTP-Zstd: unknown
-   sentinel`.
+2. If `plaintext_size < min_size`, prepend `00 00 00 00` and emit.
 
-The receiver's view of the maximum message size always refers to the
-**decompressed** plaintext, summed across all frames of a multipart
-message. A multipart message whose total wire length is smaller than the
-maximum but whose total decompressed size would exceed it MUST be
-rejected, and the check MUST happen before any decoder invocation that
-could exceed the limit.
+3. Otherwise, run the Zstandard encoder. The encoder MUST write the
+   `Frame_Content_Size` field. If the compressed output's size is
+   ≥ `plaintext_size - 4` (net saving ≤ 0 after accounting for the
+   4-byte sentinel of the uncompressed alternative), prepend
+   `00 00 00 00` and emit the plaintext instead. Otherwise emit the
+   Zstandard frame as-is.
 
-## 7. Profiles
+4. If the plaintext's first 4 bytes happen to be `28 B5 2F FD` or
+   `37 A4 30 EC` and the sender chooses not to compress, the sender
+   MUST still prepend `00 00 00 00` to avoid sentinel ambiguity.
+   Step 2 and step 3's fallback path already guarantee this.
 
-### 7.1 `zstd:none`
+### 5.6 Receiver rules
 
-No dictionary. Per-frame opportunistic compression with the 512 B sender
-threshold. The simplest profile and the only one that requires no
-out-of-band coordination or in-band setup.
+For each incoming wire part, the receiver proceeds as follows:
 
-**Use it when**: peers cannot agree on a dictionary file and
-`zstd:dict:auto` is not desired (e.g. because the application controls
-message format and wants deterministic, level-only tuning).
+1. Read the first 4 bytes as the sentinel. If the part is shorter than
+   4 bytes, drop the connection with an error.
 
-### 7.2 `zstd:dict:sha1:<hex>`
+2. Sentinel `00 00 00 00`: the remaining `N - 4` bytes are plaintext.
+   Return them.
 
-A shared dictionary, agreed out of band (typically a file shared by
-configuration management). Both peers load the same dictionary bytes
-locally, derive `dict:sha1:<hex>` from the SHA-1 hex digest of the
-dictionary, and advertise it. The handshake matches only when the digests
-are byte-equal.
+3. Sentinel `28 B5 2F FD`: the entire wire part is a Zstandard frame.
+   - Read the `Frame_Content_Size` field from the Zstandard header. If
+     the field is absent, drop the connection with an error.
+   - If the connection enforces a maximum message size, add this part's
+     declared content size to the running decompressed total for the
+     current multipart message (parts chained by the ZMTP MORE flag).
+     If the running total would exceed the maximum, drop the connection
+     with an error without invoking the decoder.
+   - Invoke the decoder in a bounded mode that aborts if it would write
+     more bytes than `Frame_Content_Size` declared. On such an abort,
+     drop the connection with an error.
+   - Return the decompressed plaintext.
 
-**Use it when**: peers are co-administered (same deployment, shared secret
-store) and the dictionary is part of the application's release artifact.
+4. Sentinel `37 A4 30 EC`: dictionary shipment. See Sec. 6.
 
-### 7.3 `zstd:dict:inline`
+5. Any other sentinel: drop the connection with an error.
 
-A dictionary supplied by one peer and shipped to the other over the wire,
-once, via a `ZDICT` command frame (Sec. 8). After both peers have a dictionary
-loaded, the connection behaves identically to `zstd:dict:sha1:<hex>` for
-the rest of its lifetime.
+The maximum message size always refers to the **decompressed** plaintext
+summed across all parts of a multipart message. A multipart message
+whose total wire length is small but whose total decompressed size
+exceeds the limit MUST be rejected before decoder invocation.
 
-The peer that has a configured dictionary is the one that sends `ZDICT`.
-The receiver of a `ZDICT` frame loads the dictionary into its **decoder**
-context only; it does not implicitly start using that dictionary on its
-own outgoing frames. If both peers have a configured dictionary they
-each send their own; each direction then uses its sender's dictionary
-(for both encode and decode on that side). The common deployment is
-one-directional (publisher ships its dictionary; subscriber decodes
-with it and sends nothing back), so this asymmetry is rarely visible.
+## 6. Dictionary Shipment
 
-**Use it when**: one side has the dictionary (publisher, gateway, server)
-and the other is a thin client that should not need to hold the
-dictionary file.
+### 6.1 Dictionary message format
 
-### 7.4 `zstd:dict:auto`
+A dictionary is shipped as a **single-part ZMTP message** (no MORE flag)
+whose body begins with the dictionary sentinel:
 
-No dictionary at connect time. The sender:
+```
++------------------+------------------------+
+| 37 A4 30 EC      | dictionary bytes       |
+| (4 bytes)        | (D bytes)              |
++------------------+------------------------+
+```
 
-1. Compresses the first messages with `zstd:none` semantics (the 512 B
-   sender threshold applies -- small frames go plaintext, large frames go
-   no-dict-Zstandard). The sender SHOULD prefer small frames as training
-   samples, since dictionaries primarily benefit small frames; an
-   implementation MAY skip frames above some size when filling the
-   sample buffer.
-2. Buffers each plaintext sample, until it has accumulated either
-   **1000 messages** OR **100 KiB** of plaintext, whichever comes first.
-3. Trains a Zstandard dictionary from the buffered samples and discards
-   the buffer.
-4. Sends the trained dictionary bytes as a `ZDICT` command frame on every
-   connection that negotiated `zstd:dict:auto` and has not yet received
-   one.
-5. Switches to dict-bound compression with the trained dictionary for
-   all subsequent message frames on those connections.
+The sentinel `37 A4 30 EC` is specific to this specification and has no
+relationship to Zstandard's internals. It was chosen to avoid collision
+with the Zstandard frame magic and the uncompressed sentinel.
 
-The receiver, on receiving a `ZDICT` command frame, loads the dictionary
-into its decoder context and applies it to all subsequent message frames
-on that connection.
+The remaining `D` bytes are the raw dictionary as it should be passed
+to the Zstandard decoder's dictionary-load operation.
 
-#### Auto-dict scope
+### 6.2 Constraints
 
-The dictionary's scope is **socket-wide**, not per-connection. A sender
-pools sample frames across **all** outgoing connections of one socket
-into a single buffer. Once trained, the dictionary is sent via `ZDICT`
-to every current connection that negotiated `zstd:dict:auto`, and is
-remembered for every future connection of that socket: newly opened or
-newly accepted connections that negotiate `zstd:dict:auto` receive the
-dictionary as a `ZDICT` command frame at the start of their session,
-before any compressed message frame.
+- A dictionary message MUST be a single-part ZMTP message (MORE flag
+  not set on the frame header). A dictionary sentinel in a multipart
+  message's non-final or non-only part is a protocol error.
 
-Socket-wide scope is most valuable for sockets whose connections are
-short-lived or churn frequently (reconnecting subscribers, request/reply
-clients, transient peers). With per-connection training each new
-connection would have to re-accumulate samples from scratch, and a
-connection that dies before reaching the training threshold would never
-get a dictionary at all. With socket-wide scope, the very first
-compressed frame on a freshly-opened connection already benefits from
-the dictionary trained by its predecessors.
+- A dictionary message MUST NOT exceed **64 KiB** total (sentinel +
+  dictionary bytes). A receiver that receives a dictionary message
+  larger than 64 KiB MUST drop the connection with an error.
 
-The dictionary is never persisted across socket restarts: there is no
-on-disk format and no cross-process sharing.
+- A sender MUST send at most **one** dictionary message per direction
+  per connection. A receiver that receives a second dictionary message
+  on the same connection MUST drop the connection with an error.
 
-#### Receiver-side cost
+- A dictionary message MUST be sent BEFORE any compressed part that
+  references the dictionary. In practice this means the sender ships
+  the dictionary before (or immediately after training triggers during)
+  the first compressed write that would benefit from it.
 
-Each compressed frame must be decoded against the dictionary that was
-loaded for that specific connection. A receive-side socket with N
-inbound connections that all negotiated `zstd:dict:auto` therefore
-holds **N independently loaded decoder dictionaries**, one per
-connection, because each peer trains its own dictionary from its own
-sample set and ships it via that connection's `ZDICT` frame. The trained
-bytes diverge across senders almost immediately, so dedup-by-content is
-unlikely to recover anything in practice. Implementations MAY still
-hash incoming `ZDICT` bodies and intern matching ones; the wire format
-neither enables nor forbids it.
+### 6.3 Receiver handling
 
-A deployment that wants explicit, negotiated dictionary identity across
-many peers (so the receiver can intern by digest with no ambiguity)
-SHOULD use `zstd:dict:sha1:<hex>` instead.
+When the receiver encounters a dictionary part:
 
-**Use it when**: zero configuration is more important than maximum
-dictionary quality.
+1. Validate the constraints in Sec. 6.2.
+2. Strip the 4-byte sentinel.
+3. Install the remaining bytes as the decompression dictionary for this
+   connection.
+4. Discard the message — it is not delivered to the application.
 
-#### Edge cases
+If all parts of a ZMTP message are dictionary parts (which is always
+the case, since dictionary messages are single-part), the receiver
+loops to receive the next message.
 
-- **Late joiners**: covered by socket-wide scope above. A connection
-  that opens after the socket has already trained its dictionary
-  receives a `ZDICT` command frame immediately after the ZMTP handshake
-  completes, before any compressed message frame on that connection.
-- **Trainer failure**: if dictionary training returns an error (the
-  sample set was too small or too uniform), the sender MUST stay in
-  `zstd:none` mode for the rest of the socket's lifetime. It MUST NOT
-  retry training.
-- **Threshold trigger order**: the message-count and byte-count
-  thresholds are independent. Training fires the moment **either** is
-  met. A workload of one 100 KiB message triggers training after the
-  first message; a workload of 1000 64-byte messages triggers training
-  after exactly 1000 frames.
+### 6.4 Dictionary scope
 
-## 8. The `ZDICT` command frame
+The dictionary a sender ships applies to a single direction of a single
+connection. Each peer may independently ship its own dictionary for its
+own send direction. The common deployment is one-directional: a
+publisher ships its dictionary; subscribers decode with it and send
+nothing (or uncompressed traffic) back.
 
-A new ZMTP command frame:
+The sender's dictionary is typically socket-wide: trained once from
+early traffic across all connections and reused. But this is an
+implementation choice — the wire protocol carries no dictionary identity
+or scope metadata.
 
-| Field | Value |
-|----------|--------------------------------------------------------|
-| Type | ZMTP command frame (frame header `COMMAND` bit set) |
-| Name | The 5 ASCII bytes `ZDICT`, encoded per RFC 37 as the 1-byte length `05` followed by `ZDICT` (6 bytes on the wire) |
-| Body | Raw dictionary bytes, no framing, no length prefix |
+An implementation MAY pool training samples and share the resulting
+auto-trained dictionary across all `zstd+tcp://` connections of a
+single socket. This is beneficial when a socket binds or connects
+multiple `zstd+tcp://` endpoints: samples from one endpoint accelerate
+training for all of them, and newly opened connections benefit from a
+dictionary trained by their predecessors. Connections that were
+configured with an explicit out-of-band dictionary MUST NOT participate
+in shared training — they use their own dictionary independently.
 
-The command frame's body is the dictionary as it should be passed to the
-Zstandard decoder's dictionary-load operation. The `ZDICT` command frame
-is used by both `zstd:dict:inline` (sender ships a configured dictionary
-at connect time) and `zstd:dict:auto` (sender ships a trained dictionary
-mid-stream).
+### 6.5 Automatic dictionary training
 
-A `ZDICT` command frame MAY appear at most once per direction per
-connection. Receiving a second `ZDICT` MUST drop the connection with
-`ZMTP-Zstd: duplicate ZDICT`. Receiving a `ZDICT` on a connection whose
-negotiated profile is `zstd:none` or `zstd:dict:sha1:<hex>` MUST drop the
-connection with `ZMTP-Zstd: unexpected ZDICT`.
+A sender MAY train a dictionary automatically from early traffic:
 
-A `ZDICT` command frame MUST NOT be larger than **64 KiB**. The cap is
-deliberately conservative: the Zstandard project recommends a roughly
-100:1 training-sample to dictionary ratio, so a 100 KiB sample budget
-(Sec. 7.4) yields a ~1 KiB trained dictionary, and even hand-tuned
-dictionaries for small-message workloads are typically a few hundred
-bytes to a few kilobytes. 64 KiB leaves an order of magnitude of
-headroom while preventing a peer from forcing an arbitrarily large
-allocation. Implementations that need larger dictionaries should use
-`zstd:dict:sha1:<hex>`, which ships the dictionary out of band and
-imposes no in-band size limit.
+1. Buffer plaintext samples from the first messages. Samples larger
+   than **1024 bytes** SHOULD be skipped — dictionaries primarily
+   benefit small frames.
+2. When the buffer reaches **1000 samples** OR **100 KiB** of
+   plaintext (whichever comes first), train a Zstandard dictionary from
+   the buffered samples and discard the buffer.
+3. The recommended dictionary capacity (training target size) is
+   **8 KiB**.
+4. Ship the trained dictionary via a dictionary message (Sec. 6.1) on
+   every connection, before any compressed part that uses it.
+5. Switch to dictionary-bound compression for all subsequent parts.
 
-## 9. Security Considerations
+If training fails (the sample set was too small or too uniform), the
+sender MUST stay in no-dictionary mode for the rest of the socket's
+lifetime. It MUST NOT retry training.
 
-### 9.1 Compression combined with encryption (CRIME / BREACH)
+### 6.6 Dictionary ID
 
-Combining length-revealing compression with a secure channel that carries
-attacker-influenced plaintext enables CRIME- and BREACH-style side-channel
-attacks: an attacker who can inject chosen bytes into the plaintext and
-observe the ciphertext length can extract secrets byte by byte.
+Auto-trained dictionaries SHOULD be patched with a random dictionary ID
+in the Zstandard user range (32768 to 2^31 - 1) to avoid collisions
+with Zstandard's built-in dictionary IDs. Out-of-band dictionaries
+retain whatever dictionary ID they were created with.
 
-Therefore: **implementations MUST refuse to enable ZMTP-Zstd on a
-connection whose ZMTP mechanism is anything other than NULL or PLAIN.** In
-particular, ZMTP-Zstd MUST NOT coexist with CurveZMQ on the same
-connection.
+## 7. ZMTP Interaction
 
-An application that deliberately accepts the risk (because it controls
-all plaintext and no attacker can inject bytes) MAY override this with an
-explicit, loud opt-in. Implementations that expose a connection-
-monitoring facility SHOULD surface such an override through it.
+### 7.1 Greeting and handshake
 
-### 9.2 Length side-channel
+The ZMTP greeting and security mechanism handshake proceed over raw TCP
+exactly as specified by RFC 37. `zstd+tcp://` does not modify the
+greeting, mechanism, READY properties, or any command frames. The
+compression layer activates only after the handshake is complete and the
+connection is ready for message traffic.
 
-Compression makes the wire length of a frame depend on its content. An
-on-path observer that can see the wire bytes can therefore learn
-something about the plaintext from the compressed length alone, even
-though ZMTP-Zstd itself provides no confidentiality. Deployments that
-care about traffic analysis MUST NOT rely on ZMTP-Zstd to hide payload
-shape.
+### 7.2 Command frames
 
-### 9.3 Dictionary contents
+ZMTP command frames (READY, SUBSCRIBE, CANCEL, JOIN, LEAVE, PING,
+PONG) are never compressed. They are sent and received as standard ZMTP
+command frames. Only message frames (the COMMAND bit not set in the
+frame header) are subject to sentinel-dispatched encoding.
 
-The dictionary is part of the trust boundary in `zstd:dict:inline` and
-`zstd:dict:auto`: the receiver loads bytes the peer chose. The
-Zstandard reference dictionary loader is hardened against malformed
-inputs, but implementations MUST enforce the 64 KiB cap on `ZDICT` frames
-(Sec. 8) and SHOULD NOT cache received dictionaries across connections.
+### 7.3 Socket type compatibility
 
-### 9.4 Decompression bombs
+`zstd+tcp://` is compatible with all ZMTP socket types. The socket type
+negotiation in the READY handshake is unaffected.
 
-A small compressed frame can decompress to many MB of plaintext. The
-sender rules in Sec. 6.4 do not prevent a malicious peer from sending such a
-frame. The receiver rules in Sec. 6.5 mitigate this in two ways:
+### 7.4 Peer requirement
 
-1. Every compressed frame MUST carry `Frame_Content_Size` in its
-   Zstandard header (sender rule Sec. 6.4 step 4). The receiver checks the
-   declared total against the connection's maximum message size before
+Both peers of a connection MUST use `zstd+tcp://`. There is no
+fallback to plaintext TCP and no negotiation. A `zstd+tcp://` peer
+connecting to a plain `tcp://` peer (or vice versa) will see garbled
+data or sentinel errors and the connection will fail.
+
+## 8. Security Considerations
+
+### 8.1 Compression combined with encryption (CRIME / BREACH)
+
+Combining length-revealing compression with a secure channel that
+carries attacker-influenced plaintext enables CRIME- and BREACH-style
+side-channel attacks. An attacker who can inject chosen bytes into the
+plaintext and observe the ciphertext length can extract secrets byte
+by byte.
+
+Implementations SHOULD refuse to layer `zstd+tcp://` inside an
+encrypted tunnel when the plaintext contains attacker-controlled
+content. Deployments that accept this risk MUST do so with explicit
+opt-in.
+
+### 8.2 Length side-channel
+
+Compression makes the wire length of a part depend on its content. An
+on-path observer can learn something about the plaintext from the
+compressed length alone. Deployments that care about traffic analysis
+MUST NOT rely on `zstd+tcp://` to hide payload shape.
+
+### 8.3 Dictionary contents
+
+When auto-training is enabled, the receiver loads dictionary bytes
+chosen by the peer. The Zstandard reference dictionary loader is
+hardened against malformed inputs, but implementations MUST enforce the
+64 KiB cap on dictionary messages (Sec. 6.2) and SHOULD NOT cache
+received dictionaries across connections.
+
+### 8.4 Decompression bombs
+
+A small compressed frame can decompress to many megabytes of plaintext.
+The receiver rules in Sec. 5.6 mitigate this:
+
+1. Every compressed part MUST carry `Frame_Content_Size`. The receiver
+   checks the declared total against the maximum message size before
    invoking the decoder, so a bomb is rejected on its header alone.
-2. The decoder is invoked in a bounded mode that aborts the moment it
-   would write more bytes than `Frame_Content_Size` declared, so a peer
-   that lies in the header still cannot expand a frame past its declared
-   size.
+2. The decoder is invoked in bounded mode — it aborts if it would write
+   more bytes than declared. A peer that lies in the header cannot
+   expand a part past its declared size.
 
-Implementations SHOULD set a conservative maximum message size whenever
-`X-Compression` is enabled, even if they would otherwise leave it
+Implementations SHOULD set a conservative maximum message size on
+`zstd+tcp://` connections even if they would otherwise leave it
 unbounded.
 
-## 10. Interoperability and Backwards Compatibility
-
-### 10.1 Unaware peers
-
-A ZMTP 3.1 peer that does not understand the `X-Compression` property
-simply ignores it. Its own READY command will not contain the property,
-the aware side will see no match, and the connection runs in plaintext.
-No handshake-level failure.
-
-### 10.2 Aware peers with no overlap
-
-If both peers advertise `X-Compression` but their profile lists do not
-intersect, the connection runs in plaintext. Implementations that expose
-a connection-monitoring facility SHOULD surface this outcome through it,
-so that deployment mistakes (wrong dictionary, wrong profile) are
-discoverable.
-
-### 10.3 Forward compatibility
-
-All implementations MUST be liberal about unknown profiles in the peer's
-`X-Compression` list. An unknown profile is ignored during matching and
-is not a protocol error. Future RFCs add new profiles by:
-
-1. Picking a profile string with a clear algorithm prefix (e.g.
-   `lz4:dict:auto`).
-2. Reserving a new 4-byte sentinel (the algorithm's frame magic, ideally).
-3. Defining sender / receiver rules for that sentinel.
-4. Publishing the spec.
-
-No central registry is needed: profile-string and sentinel collisions are
-caught at code-review time when the new RFC is being written, and the
-algorithm prefix in the profile string makes the namespace effectively
-self-managing.
-
-## 11. Constants
+## 9. Constants
 
 ```
-SENTINEL_UNCOMPRESSED = 00 00 00 00 (4 bytes)
-SENTINEL_ZSTD_FRAME = 28 B5 2F FD (4 bytes, official Zstandard frame magic)
+SENTINEL_UNCOMPRESSED   = 00 00 00 00   (4 bytes)
+SENTINEL_ZSTD_FRAME     = 28 B5 2F FD   (4 bytes, Zstandard frame magic)
+SENTINEL_ZSTD_DICT      = 37 A4 30 EC   (4 bytes)
 
-PROPERTY_NAME = "X-Compression"
+DEFAULT_LEVEL           = -3
 
-DEFAULT_LEVEL = -3
+MIN_COMPRESS_NO_DICT    = 512 bytes
+MIN_COMPRESS_WITH_DICT  = 64 bytes
 
-MIN_COMPRESS_BYTES_NO_DICT = 512
-MIN_COMPRESS_BYTES_DICT = 64
+MAX_DECOMPRESSED_SIZE   = 16 MiB        (absolute cap per frame)
+MAX_DICT_SIZE           = 64 KiB
 
-AUTO_DICT_SAMPLE_COUNT = 1000
-AUTO_DICT_SAMPLE_BYTES = 100 * 1024
-DICT_FRAME_MAX_SIZE = 64 * 1024
-
-PROFILE_NONE = "zstd:none"
-PROFILE_DICT_PREFIX = "zstd:dict:sha1:"
-PROFILE_DICT_INLINE = "zstd:dict:inline"
-PROFILE_DICT_AUTO = "zstd:dict:auto"
+TRAIN_MAX_SAMPLES       = 1000
+TRAIN_MAX_BYTES         = 100 KiB
+TRAIN_MAX_SAMPLE_LEN    = 1024 bytes
+DICT_CAPACITY           = 8 KiB
 ```
 
-## 12. References
+## 10. References
 
-- [RFC 37 / ZMTP 3.1](https://rfc.zeromq.org/spec/37/) -- underlying transport
-- [RFC 8478 -- Zstandard Compression and the application/zstd Media Type](https://datatracker.ietf.org/doc/html/rfc8478)
+- [RFC 37 / ZMTP 3.1](https://rfc.zeromq.org/spec/37/) — underlying wire protocol
+- [RFC 8878 — Zstandard Compression Data Format](https://datatracker.ietf.org/doc/html/rfc8878)
 - [Zstandard dictionary builder](https://github.com/facebook/zstd/blob/dev/lib/dictBuilder/zdict.h)
-- [CRIME attack](https://en.wikipedia.org/wiki/CRIME) -- compression-side-channel attack on TLS
-- [BREACH attack](https://en.wikipedia.org/wiki/BREACH) -- HTTP-layer variant of the same family
+- [CRIME attack](https://en.wikipedia.org/wiki/CRIME) — compression side-channel on TLS
+- [BREACH attack](https://en.wikipedia.org/wiki/BREACH) — HTTP-layer variant

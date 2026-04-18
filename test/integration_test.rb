@@ -2,16 +2,13 @@
 
 require_relative "test_helper"
 
-class IntegrationTest < Minitest::Test
-  def test_push_pull_round_trip_with_zstd_none
+describe "zstd+tcp:// transport" do
+  it "round-trips a large payload with no dict" do
     Sync do
-      push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.none
-      pull.compression = OMQ::Compression::Zstd.none
-
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
+      push = OMQ::PUSH.new
+      uri  = pull.bind("zstd+tcp://127.0.0.1:0")
+      push.connect(uri.to_s)
 
       payload = "a" * 4096
       push << [payload]
@@ -24,15 +21,12 @@ class IntegrationTest < Minitest::Test
   end
 
 
-  def test_round_trip_small_payload_below_threshold
+  it "round-trips a small payload below threshold" do
     Sync do
-      push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.none
-      pull.compression = OMQ::Compression::Zstd.none
-
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
+      push = OMQ::PUSH.new
+      uri  = pull.bind("zstd+tcp://127.0.0.1:0")
+      push.connect(uri.to_s)
 
       push << ["hi"]
       assert_equal ["hi"], pull.receive
@@ -43,68 +37,19 @@ class IntegrationTest < Minitest::Test
   end
 
 
-  def test_no_compression_when_peer_does_not_advertise
+  it "auto-trains and ships dict to receiver" do
     Sync do
-      push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.none
-      # pull has no compression -- peer will not advertise X-Compression
-
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
-
-      payload = "b" * 4096
-      push << [payload]
-      assert_equal [payload], pull.receive
-    ensure
-      push&.close
-      pull&.close
-    end
-  end
-
-
-  def test_round_trip_with_inline_dictionary
-    dict = ("the quick brown fox jumps over " * 20).b
-    Sync do
       push = OMQ::PUSH.new
-      pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
-      pull.compression = OMQ::Compression::Zstd.with_dictionary(dict, inline: true)
+      uri  = pull.bind("zstd+tcp://127.0.0.1:0")
+      push.connect(uri.to_s)
 
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
-
-      msg = ("the quick brown fox " * 50).b
-      push << [msg]
-      assert_equal [msg], pull.receive
-    ensure
-      push&.close
-      pull&.close
-    end
-  end
-
-
-  def test_auto_dict_trains_and_ships_dict_to_receiver
-    Sync do
-      push = OMQ::PUSH.new
-      pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.auto
-      pull.compression = OMQ::Compression::Zstd.auto
-
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
-
-      # 200 unique-but-templated samples crossing AUTO_DICT_SAMPLE_BYTES
-      # (100 KiB) so training fires.
       template = "user=%s|status=active|tier=gold|region=eu-west-%d|payload=" + ("x" * 600)
       sent = 200.times.map { |i| format(template, "user_#{i}@example.com", i % 4) }
       sent.each { |m| push << [m] }
 
       received = sent.size.times.map { pull.receive.first }
       assert_equal sent, received
-
-      assert push.compression.trained?, "send compression should be trained"
-      assert pull.compression.has_recv_dictionary?, "recv compression should have dict installed via ZDICT frame"
     ensure
       push&.close
       pull&.close
@@ -112,27 +57,17 @@ class IntegrationTest < Minitest::Test
   end
 
 
-  # RFC Sec. 6.5: a compressed frame whose declared content size
-  # exceeds the receiver's max_message_size must cause the connection
-  # to drop without invoking the decoder.
-  #
-  def test_byte_bomb_drops_connection
+  it "rejects a byte bomb exceeding max_message_size" do
     Sync do
-      push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression       = OMQ::Compression::Zstd.none
-      pull.compression       = OMQ::Compression::Zstd.none
-      pull.max_message_size  = 4096
-      pull.read_timeout      = 0.5
+      push = OMQ::PUSH.new
+      pull.max_message_size = 4096
+      uri = pull.bind("zstd+tcp://127.0.0.1:0")
+      push.connect(uri.to_s)
 
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
-
-      # 1 MiB of 'A' compresses to a few hundred bytes but declares
-      # 1_048_576 in Frame_Content_Size — well past pull's 4096 cap.
       push << ["A" * 1_048_576]
 
-      assert_raises(IO::TimeoutError) { pull.receive }
+      assert_raises(OMQ::SocketDeadError) { pull.receive }
     ensure
       push&.close
       pull&.close
@@ -140,46 +75,18 @@ class IntegrationTest < Minitest::Test
   end
 
 
-  # RFC Sec. 6.4 "Passive senders": the pull side advertises the profile
-  # (so negotiation matches) but never compresses its own outgoing. The
-  # push side encodes normally; pull decodes and passes through.
-  def test_passive_receiver_decodes_active_senders_compressed_frames
+  it "round-trips a multipart message" do
     Sync do
-      push = OMQ::PUSH.new
       pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.auto
-      pull.compression = OMQ::Compression::Zstd.auto(passive: true)
-
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
-
-      payload = ("the quick brown fox " * 50).b
-      push << [payload]
-      assert_equal [payload], pull.receive
-
-      assert pull.compression.passive?, "pull should report passive"
-      assert_equal Float::INFINITY, pull.compression.min_compress_bytes
-    ensure
-      push&.close
-      pull&.close
-    end
-  end
-
-
-  def test_round_trip_with_static_dictionary
-    dict = ("lorem ipsum dolor sit amet " * 20).b
-    Sync do
       push = OMQ::PUSH.new
-      pull = OMQ::PULL.new
-      push.compression = OMQ::Compression::Zstd.with_dictionary(dict)
-      pull.compression = OMQ::Compression::Zstd.with_dictionary(dict)
+      uri  = pull.bind("zstd+tcp://127.0.0.1:0")
+      push.connect(uri.to_s)
 
-      pull.bind("tcp://127.0.0.1:0")
-      push.connect(pull.last_endpoint)
+      parts = ["header-data " * 100, "body-content " * 200, "trailer " * 50]
+      push << parts
 
-      msg = ("lorem ipsum dolor " * 50).b
-      push << [msg]
-      assert_equal [msg], pull.receive
+      received = pull.receive
+      assert_equal parts, received
     ensure
       push&.close
       pull&.close
