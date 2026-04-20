@@ -151,7 +151,6 @@ individual parts are within bounds.
 ## Constants
 
 ```
-MAX_DECOMPRESSED_SIZE  = 16 MiB   (absolute cap per frame)
 MAX_DICT_SIZE          = 64 KiB   (reject oversized dicts)
 DICT_CAPACITY          = 8 KiB    (training target size)
 TRAIN_MAX_SAMPLES      = 1000

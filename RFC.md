@@ -435,7 +435,6 @@ DEFAULT_LEVEL           = -3
 MIN_COMPRESS_NO_DICT    = 512 bytes
 MIN_COMPRESS_WITH_DICT  = 64 bytes
 
-MAX_DECOMPRESSED_SIZE   = 16 MiB        (absolute cap per frame)
 MAX_DICT_SIZE           = 64 KiB
 
 TRAIN_MAX_SAMPLES       = 1000
