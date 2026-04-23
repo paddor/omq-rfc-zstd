@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.1 — 2026-04-23
+
+### Changed
+
+- **Migrated to rzstd 0.4.** The old `RZstd::Dictionary` dict-bound
+  codec and the module-level `RZstd.compress` / `.decompress` are
+  gone in rzstd 0.4; this release adapts the transport.
+  - `Codec#install_send_dict` now builds a fresh
+    `RZstd::FrameCodec.new(dict:, level:)` per dict install (rzstd
+    treats dict as a permanent codec property).
+  - `ZstdConnection#install_recv_dict` does the same on the receive
+    side. `@recv_codec` replaces `@recv_dict`; starts no-dict,
+    rebuilt dict-bound when a shipment arrives.
+  - `Codec#compress_or_plain` always dispatches to `@send_codec`
+    (no more module-level fallback).
+  - `patch_auto_dict_id` now reads `.bytes` off the `Dictionary`
+    value returned by `RZstd::Dictionary.train` (train returns a
+    Dictionary in 0.4, not raw bytes).
+  - Gemspec dep bumped to `rzstd ~> 0.4`.
+- Benches updated to the new API (pre-built per-level FrameCodec
+  maps, `.bytes` on trained Dictionary values).
+
+### Notes
+
+- No wire-format or behavioural change. The on-wire contract
+  specified in `RFC.md` is unchanged; this is an internal migration
+  to match the rzstd API shape.
+
 ## v0.4.0 — 2026-04-18
 
 ### Changed
