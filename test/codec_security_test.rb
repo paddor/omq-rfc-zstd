@@ -110,4 +110,67 @@ describe "Codec security" do
       conn.send(:decode_parts, [padded])
     end
   end
+
+
+  it "re-ships dict on new connection after reconnect" do
+    c = codec
+    samples = 400.times.map { |i| "user_#{i}|key=#{i}|val=#{i * 7}" }
+    dict_bytes = RZstd::Dictionary.train(samples, capacity: 8 * 1024).bytes
+    c.send(:install_send_dict, dict_bytes)
+
+    # First TCP connection: dict shipped on first send
+    fake1 = FakeConn.new
+    conn1 = OMQ::Transport::ZstdTcp::ZstdConnection.new(fake1, c)
+    conn1.write_message(["payload"])
+    assert conn1.instance_variable_get(:@dict_shipped)
+    assert_equal [dict_bytes], fake1.sent.first
+
+    # Reconnect: new ZstdConnection on same shared Codec (same as wrap_connection on reconnect)
+    fake2 = FakeConn.new
+    conn2 = OMQ::Transport::ZstdTcp::ZstdConnection.new(fake2, c)
+    refute conn2.instance_variable_get(:@dict_shipped), "new connection must start with dict_shipped=false"
+    conn2.write_message(["payload"])
+    assert conn2.instance_variable_get(:@dict_shipped)
+    assert_equal 2, fake2.sent.size, "dict frame + data frame must both be sent on reconnect"
+    assert_equal [dict_bytes], fake2.sent.first, "dict must be re-shipped on reconnected connection"
+  end
+
+
+  it "encodes Frame_Content_Size in every compressed frame (no dict)" do
+    c = codec
+    payload = "hello world " * 60  # 720 bytes, above MIN_COMPRESS_NO_DICT (512), compressible
+    wire = c.send(:compress_or_plain, payload.b)
+    assert_equal OMQ::Transport::ZstdTcp::Codec::ZSTD_MAGIC, wire.byteslice(0, 4),
+                 "repetitive payload must produce a Zstd-compressed frame"
+    fcs = c.parse_frame_content_size(wire)
+    refute_nil fcs, "compressed frame must carry Frame_Content_Size"
+    assert_equal payload.bytesize, fcs
+  end
+
+
+  it "encodes Frame_Content_Size in every compressed frame (with dict)" do
+    samples = 300.times.map { |i| "record_#{i}:val=#{i * 3}:ok" }
+    dict_bytes = RZstd::Dictionary.train(samples, capacity: 8 * 1024).bytes
+    c = codec(dict: dict_bytes)
+    payload = "hello world " * 20  # 240 bytes, above MIN_COMPRESS_WITH_DICT (64), compressible
+    wire = c.send(:compress_or_plain, payload.b)
+    assert_equal OMQ::Transport::ZstdTcp::Codec::ZSTD_MAGIC, wire.byteslice(0, 4),
+                 "payload must produce a Zstd-compressed frame even with a dict codec"
+    fcs = c.parse_frame_content_size(wire)
+    refute_nil fcs, "dict-bound compressed frame must carry Frame_Content_Size"
+    assert_equal payload.bytesize, fcs
+  end
+
+
+  it "all compressed parts from compress_parts carry Frame_Content_Size" do
+    c = codec
+    parts = ["red " * 150, "blue " * 150]  # 600 and 750 bytes, highly compressible
+    wires = c.compress_parts(parts)
+    parts.zip(wires).each_with_index do |(orig, wire), idx|
+      next unless wire.byteslice(0, 4) == OMQ::Transport::ZstdTcp::Codec::ZSTD_MAGIC
+      fcs = c.parse_frame_content_size(wire)
+      refute_nil fcs, "part #{idx}: compressed frame must carry Frame_Content_Size"
+      assert_equal orig.bytesize, fcs
+    end
+  end
 end
